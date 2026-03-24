@@ -37,7 +37,7 @@ TFT_eSPI tft = TFT_eSPI();
 #define THROTTLE_MIN  500    // ADC value at 0% throttle
 #define THROTTLE_MAX  3200   // ADC value at 100% throttle
 
-// Simulated data
+
 float simSpeed    = 0.0;
 float simBattery  = 75.0;
 float simOdometer = 7028.3;
@@ -46,14 +46,8 @@ float simAccelY   = 0.0;
 float simAccelZ   = 1.0;
 bool  turnLeft    = false;
 bool  turnRight   = false;
-
-// Previous values for change detection important for simulation
 int   prevSpeed   = -1;
-float prevBatt    = -1;
-float prevOdo     = -1;
-bool  prevLeft    = false;
-bool  prevRight   = false;
-float prevAX      = -99, prevAY = -99, prevAZ = -99;
+
 
 unsigned long lastUpdate = 0;
 unsigned long lastTurn   = 0;
@@ -267,21 +261,6 @@ void loop() {
     prevSpeed = spd;
   }
 
-  if (abs(simBattery - prevBatt) > 0.5) {
-    drawBattery(simBattery);
-    prevBatt = simBattery;
-  }
-
-  if (abs(simOdometer - prevOdo) > 0.05) {
-    drawOdometer(simOdometer);
-    prevOdo = simOdometer;
-  }
-
-  if (turnLeft != prevLeft || turnRight != prevRight) {
-    drawTurnSignal(turnLeft, turnRight);
-    prevLeft  = turnLeft;
-    prevRight = turnRight;
-  }
-
+  
 
 }
