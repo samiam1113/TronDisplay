@@ -47,13 +47,13 @@ TFT_eSPI tft = TFT_eSPI();
 static QueueHandle_t    speedQueue;
 static SemaphoreHandle_t tftMutex;
 
-// Shared aux state (written by taskAux, read by taskAux only — no mutex needed)
+// Shared aux state 
 static float simBattery  = 75.0f;
 static float simOdometer = 7028.3f;
 static bool  turnLeft    = false;
 static bool  turnRight   = false;
 
-// ── Drawing helpers (unchanged from original) ────────────────────────────────
+// ── Drawing helpers for image initialization and updates ────────────────────────────────────────────────
 
 void drawArcSegment(int cx, int cy, int rIn, int rOut,
                     float startDeg, float endDeg, uint16_t color) {
@@ -163,7 +163,7 @@ void taskThrottle(void *pvParameters) {
     }
 }
 
-// Task 2: Consume speed from queue and update the arc + digits (medium priority)
+
 void taskDisplay(void *pvParameters) {
   int prevSpeed = -1;
   int speed     = 0;
@@ -182,13 +182,14 @@ void taskDisplay(void *pvParameters) {
   }
 }
 
-static const float P42A_V[]   = { 2.80, 3.00, 3.30, 3.50, 3.60, 3.65,
-                                   3.70, 3.75, 3.80, 3.90, 4.00, 4.10, 4.20 };
-static const float P42A_SOC[] = { 0.00, 0.02, 0.06, 0.12, 0.20, 0.27,
-                                   0.40, 0.55, 0.68, 0.80, 0.90, 0.97, 1.00 };
-#define P42A_POINTS 13
+// Lookup table for P42A cell voltage → SOC (linear interpolation between points)
+  static const float P42A_V[]   = { 2.80, 3.00, 3.30, 3.50, 3.60, 3.65,
+                                    3.70, 3.75, 3.80, 3.90, 4.00, 4.10, 4.20 };
+  static const float P42A_SOC[] = { 0.00, 0.02, 0.06, 0.12, 0.20, 0.27,
+                                    0.40, 0.55, 0.68, 0.80, 0.90, 0.97, 1.00 };
+  #define P42A_POINTS 13
 
-float voltage_to_soc(float v) {
+  float voltage_to_soc(float v) {
     if (v <= P42A_V[0])             return 0.0f;
     if (v >= P42A_V[P42A_POINTS-1]) return 100.0f;
     for (int i = 0; i < P42A_POINTS - 1; i++) {
@@ -202,15 +203,15 @@ float voltage_to_soc(float v) {
 
 void taskAux(void *pvParameters) {
     for (;;) {
-        // Replace the min-cell block in taskAux
-float avgCell = 0.0f;
-if (g_can_state.cell_count > 0) {
-    for (int i = 0; i < g_can_state.cell_count; i++)
-        avgCell += g_can_state.cell_v[i];
-    avgCell /= g_can_state.cell_count;
-}
+        
+    float avgCell = 0.0f;
+    if (g_can_state.cell_count > 0) {
+        for (int i = 0; i < g_can_state.cell_count; i++)
+            avgCell += g_can_state.cell_v[i];
+        avgCell /= g_can_state.cell_count;
+    }
 
-float battPct = voltage_to_soc(avgCell);  // use the lookup table from before
+    float battPct = voltage_to_soc(avgCell);  
 
         xSemaphoreTake(tftMutex, portMAX_DELAY);
         drawBattery(battPct);
