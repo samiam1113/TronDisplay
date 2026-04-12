@@ -1,7 +1,13 @@
-#include <Arduino.h>   
+#include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include "display_telemetry.h"
+
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -9,83 +15,68 @@ TFT_eSPI tft = TFT_eSPI();
 #define SCREEN_W 480
 #define SCREEN_H 320
 
-//  Colors 
-#define COL_BG       0x0000   // Black
-#define COL_ARC_BG   0x1082   // Dark grey arc track
-#define COL_ARC_FG   0x07FF   // Cyan arc fill
-#define COL_SPEED    0x07FF   // Cyan speed digits
-#define COL_UNIT     0x7BEF   // Light grey "mph"
-#define COL_BATT_BG  0x2104   // Dark green bg
-#define COL_BATT_FG  0x07FF   // Green battery fill
-#define COL_BATT_LOW 0xF800   // Red when low
-#define COL_ODO      0x7BEF   // Light grey odometer
-#define COL_TURN_ON  0x07FF   // Cyan arrow 
-#define COL_TURN_OFF 0x2104   // Dark turn signal inactive
+// Colors
+#define COL_BG       0x0000
+#define COL_ARC_BG   0x1082
+#define COL_ARC_FG   0x07FF
+#define COL_SPEED    0x07FF
+#define COL_UNIT     0x7BEF
+#define COL_BATT_BG  0x2104
+#define COL_BATT_FG  0x07FF
+#define COL_BATT_LOW 0xF800
+#define COL_ODO      0x7BEF
+#define COL_TURN_ON  0x07FF
+#define COL_TURN_OFF 0x2104
 #define COL_WHITE    0xFFFF
 
 // Arc gauge
-#define ARC_CX      240       // Center X
-#define ARC_CY      210       // Center Y 
-#define ARC_R_OUT   195       // Outer radius
-#define ARC_R_IN    165       // Inner radius
-#define ARC_START   0         // Start angle (degrees, 0=right)
-#define ARC_END     180       // End angle (sweep)
-#define SPEED_MAX   100       // Max speed for full arc
+#define ARC_CX      240
+#define ARC_CY      210
+#define ARC_R_OUT   195
+#define ARC_R_IN    165
+#define ARC_START   0
+#define ARC_END     180
+#define SPEED_MAX   100
 
-// Throttle values
+// Throttle
 #define THROTTLE_PIN  13
-#define THROTTLE_MIN  500    // ADC value at 0% throttle
-#define THROTTLE_MAX  3200   // ADC value at 100% throttle
+#define THROTTLE_MIN  500
+#define THROTTLE_MAX  3200
 
+// FreeRTOS handles
+static QueueHandle_t    speedQueue;
+static SemaphoreHandle_t tftMutex;
 
-float simSpeed    = 0.0;
-float simBattery  = 75.0;
-float simOdometer = 7028.3;
-float simAccelX   = 0.0;
-float simAccelY   = 0.0;
-float simAccelZ   = 1.0;
-bool  turnLeft    = false;
-bool  turnRight   = false;
-int   prevSpeed   = -1;
+// Shared aux state (written by taskAux, read by taskAux only — no mutex needed)
+static float simBattery  = 75.0f;
+static float simOdometer = 7028.3f;
+static bool  turnLeft    = false;
+static bool  turnRight   = false;
 
+// ── Drawing helpers (unchanged from original) ────────────────────────────────
 
-unsigned long lastUpdate = 0;
-unsigned long lastTurn   = 0;
-int simPhase = 0;
-
-
-void drawArcSegment(int cx, int cy, int rIn, int rOut, float startDeg, float endDeg, uint16_t color) {
-  float step = 1.0;
-  for (float a = startDeg; a <= endDeg; a += step) {
+void drawArcSegment(int cx, int cy, int rIn, int rOut,
+                    float startDeg, float endDeg, uint16_t color) {
+  for (float a = startDeg; a <= endDeg; a += 1.0f) {
     float rad = a * DEG_TO_RAD;
     float cosA = cos(rad), sinA = sin(rad);
-    int x0 = cx + rIn  * cosA;
-    int y0 = cy + rIn  * sinA;
-    int x1 = cx + rOut * cosA;
-    int y1 = cy + rOut * sinA;
-    tft.drawLine(x0, y0, x1, y1, color);
+    tft.drawLine(cx + rIn  * cosA, cy + rIn  * sinA,
+                 cx + rOut * cosA, cy + rOut * sinA, color);
   }
 }
 
 void drawArcBackground() {
-  float startRad = (180 + ARC_START) * DEG_TO_RAD; // flip for screen coords
-  float totalDeg = ARC_END;
-  drawArcSegment(ARC_CX, ARC_CY, ARC_R_IN, ARC_R_OUT,
-               180, 360, COL_ARC_BG);
+  drawArcSegment(ARC_CX, ARC_CY, ARC_R_IN, ARC_R_OUT, 180, 360, COL_ARC_BG);
 
-  // Tick marks every 10 mph
   for (int s = 0; s <= SPEED_MAX; s += 10) {
-    float frac = (float)s / SPEED_MAX;
-    float deg = (180 + frac * 180) * DEG_TO_RAD;
-    int x0 = ARC_CX + (ARC_R_IN  - 5) * cos(deg);
-    int y0 = ARC_CY + (ARC_R_IN  - 5) * sin(deg);
-    int x1 = ARC_CX + (ARC_R_OUT + 5) * cos(deg);
-    int y1 = ARC_CY + (ARC_R_OUT + 5) * sin(deg);
-    tft.drawLine(x0, y0, x1, y1, COL_WHITE);
+    float deg = (180 + (float)s / SPEED_MAX * 180) * DEG_TO_RAD;
+    tft.drawLine(ARC_CX + (ARC_R_IN  - 5) * cos(deg),
+                 ARC_CY + (ARC_R_IN  - 5) * sin(deg),
+                 ARC_CX + (ARC_R_OUT + 5) * cos(deg),
+                 ARC_CY + (ARC_R_OUT + 5) * sin(deg), COL_WHITE);
   }
 
-  // "0" and "100" labels
-  float d0   = (180 + ARC_START) * DEG_TO_RAD;
+  float d0   = (180 + ARC_START)           * DEG_TO_RAD;
   float d100 = (180 + ARC_START + ARC_END) * DEG_TO_RAD;
   tft.setTextColor(COL_UNIT, COL_BG);
   tft.setTextSize(1);
@@ -97,68 +88,37 @@ void drawArcBackground() {
   tft.print("100");
 }
 
-// Update arc fill for current speed
 void updateArc(int speed) {
-  float frac = constrain((float)speed / SPEED_MAX, 0.0, 1.0);
-  float fillStart = 180;
-  float fillEnd   = 180 + frac * 180;
-  float fullEnd   = 360;
-
-  // Fill
-if (frac > 0)
-  drawArcSegment(ARC_CX, ARC_CY, ARC_R_IN, ARC_R_OUT,
-                 fillStart, fillEnd, COL_ARC_FG);
-
-// Clear remainder
-if (fillEnd < fullEnd)
-  drawArcSegment(ARC_CX, ARC_CY, ARC_R_IN, ARC_R_OUT,
-                 fillEnd, fullEnd, COL_ARC_BG);
+  float frac     = constrain((float)speed / SPEED_MAX, 0.0f, 1.0f);
+  float fillEnd  = 180 + frac * 180;
+  if (frac > 0)
+    drawArcSegment(ARC_CX, ARC_CY, ARC_R_IN, ARC_R_OUT, 180, fillEnd, COL_ARC_FG);
+  if (fillEnd < 360)
+    drawArcSegment(ARC_CX, ARC_CY, ARC_R_IN, ARC_R_OUT, fillEnd, 360, COL_ARC_BG);
 }
 
-
-// Speed mph
 void drawSpeed(int speed) {
-  // Clear old number
   tft.fillRect(170, 110, 160, 90, COL_BG);
-
   tft.setTextColor(COL_SPEED, COL_BG);
   tft.setTextSize(7);
-
   char buf[4];
   sprintf(buf, "%d", speed);
-
-  // Center the text
-  int len = strlen(buf);
-  int x = 240 - (len * 42) / 2;  
-  tft.setCursor(x, 115);
+  tft.setCursor(240 - (strlen(buf) * 42) / 2, 115);
   tft.print(buf);
-
-  // "mph" label
   tft.setTextColor(COL_UNIT, COL_BG);
   tft.setTextSize(2);
   tft.setCursor(290, 190);
   tft.print("mph");
 }
 
-// Battery indicator
 void drawBattery(float pct) {
   int bx = 430, by = 10, bw = 30, bh = 80;
-
-  // Outline
   tft.drawRect(bx, by, bw, bh, COL_WHITE);
-  // Terminal nub
   tft.fillRect(bx + 8, by - 5, 14, 6, COL_WHITE);
-
-  // Fill
-  int fillH = (int)((pct / 100.0) * (bh - 4));
+  int fillH = (int)((pct / 100.0f) * (bh - 4));
   uint16_t fillColor = (pct < 20) ? COL_BATT_LOW : COL_BATT_FG;
-
-  // Clear interior
   tft.fillRect(bx + 2, by + 2, bw - 4, bh - 4, COL_BG);
-  // Draw fill from bottom
   tft.fillRect(bx + 2, by + 2 + (bh - 4 - fillH), bw - 4, fillH, fillColor);
-
-  // Percentage text
   tft.fillRect(bx - 10, by + bh + 4, 50, 16, COL_BG);
   tft.setTextColor(COL_WHITE, COL_BG);
   tft.setTextSize(1);
@@ -168,99 +128,135 @@ void drawBattery(float pct) {
   tft.print(buf);
 }
 
-
 void drawOdometer(float odo) {
   tft.fillRect(150, 285, 180, 18, COL_BG);
   tft.setTextColor(COL_ODO, COL_BG);
   tft.setTextSize(2);
   char buf[16];
   sprintf(buf, "%.1f mi", odo);
-  int len = strlen(buf) * 12;
-  tft.setCursor(240 - len / 2, 286);
+  tft.setCursor(240 - (strlen(buf) * 12) / 2, 286);
   tft.print(buf);
 }
 
-void drawTurnSignal(bool left, bool right) {
-
-  uint16_t lc = left  ? COL_TURN_ON : COL_TURN_OFF;
-  uint16_t rc = right ? COL_TURN_ON : COL_TURN_OFF;
-
-  int leftBaseX  = 95;   
-  int rightBaseX = 385;  
-
-  // LEFT arrow
-  tft.fillTriangle(leftBaseX, 140,
-                   leftBaseX + 30, 120,
-                   leftBaseX + 30, 160, lc);
-  tft.fillRect(leftBaseX + 30, 128, 25, 24, lc);
-
-  // RIGHT arrow
-  tft.fillTriangle(rightBaseX, 140,
-                   rightBaseX - 30, 120,
-                   rightBaseX - 30, 160, rc);
-  tft.fillRect(rightBaseX - 55, 128, 25, 24, rc);
-}
-
-
-// Static UI
 void drawStaticUI() {
   tft.fillScreen(COL_BG);
-
-  // Odometer label
   tft.setTextColor(COL_ODO, COL_BG);
   tft.setTextSize(1);
   tft.setCursor(5, 300);
   tft.print("ODO");
-
   drawArcBackground();
 }
 
+// ── FreeRTOS tasks ────────────────────────────────────────────────────────────
 
-void readThrottle() {
-  int raw = analogRead(THROTTLE_PIN);
-  
-  // Map raw ADC to 0-100 speed range
-  simSpeed = map(raw, THROTTLE_MIN, THROTTLE_MAX, 0, SPEED_MAX);
-  simSpeed = constrain(simSpeed, 0, SPEED_MAX);
+void taskThrottle(void *pvParameters) {
+    for (;;) {
+        uint16_t raw   = (uint16_t)analogRead(THROTTLE_PIN);
+        int      speed = (int)constrain(
+                           map(raw, THROTTLE_MIN, THROTTLE_MAX, 0, SPEED_MAX),
+                           0, SPEED_MAX);
+
+        xQueueOverwrite(speedQueue, &speed);
+        telemetry_send_throttle(raw);   // raw ADC → CAN 0x200
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
+// Task 2: Consume speed from queue and update the arc + digits (medium priority)
+void taskDisplay(void *pvParameters) {
+  int prevSpeed = -1;
+  int speed     = 0;
+
+  for (;;) {
+    // Block until a new speed value arrives (or 100 ms timeout as a safety net)
+    if (xQueueReceive(speedQueue, &speed, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (speed != prevSpeed) {
+        xSemaphoreTake(tftMutex, portMAX_DELAY);
+        updateArc(speed);
+        drawSpeed(speed);
+        xSemaphoreGive(tftMutex);
+        prevSpeed = speed;
+      }
+    }
+  }
+}
+
+static const float P42A_V[]   = { 2.80, 3.00, 3.30, 3.50, 3.60, 3.65,
+                                   3.70, 3.75, 3.80, 3.90, 4.00, 4.10, 4.20 };
+static const float P42A_SOC[] = { 0.00, 0.02, 0.06, 0.12, 0.20, 0.27,
+                                   0.40, 0.55, 0.68, 0.80, 0.90, 0.97, 1.00 };
+#define P42A_POINTS 13
+
+float voltage_to_soc(float v) {
+    if (v <= P42A_V[0])             return 0.0f;
+    if (v >= P42A_V[P42A_POINTS-1]) return 100.0f;
+    for (int i = 0; i < P42A_POINTS - 1; i++) {
+        if (v >= P42A_V[i] && v < P42A_V[i + 1]) {
+            float t = (v - P42A_V[i]) / (P42A_V[i + 1] - P42A_V[i]);
+            return (P42A_SOC[i] + t * (P42A_SOC[i + 1] - P42A_SOC[i])) * 100.0f;
+        }
+    }
+    return 0.0f;
+}
+
+void taskAux(void *pvParameters) {
+    for (;;) {
+        // Replace the min-cell block in taskAux
+float avgCell = 0.0f;
+if (g_can_state.cell_count > 0) {
+    for (int i = 0; i < g_can_state.cell_count; i++)
+        avgCell += g_can_state.cell_v[i];
+    avgCell /= g_can_state.cell_count;
+}
+
+float battPct = voltage_to_soc(avgCell);  // use the lookup table from before
+
+        xSemaphoreTake(tftMutex, portMAX_DELAY);
+        drawBattery(battPct);
+        drawOdometer(simOdometer);
+
+        // Flash fault indicator if active
+        if (g_can_state.fault_active) {
+            tft.setTextColor(TFT_RED, COL_BG);
+            tft.setTextSize(1);
+            tft.setCursor(5, 5);
+            tft.printf("FAULT %lu", g_can_state.fault_code);
+        }
+        xSemaphoreGive(tftMutex);
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
+    Serial.begin(115200);
+    delay(1000);
 
-  analogReadResolution(12);  
-  pinMode(THROTTLE_PIN, INPUT);
+    analogReadResolution(12);
+    pinMode(THROTTLE_PIN, INPUT);
 
-  tft.init();
-  tft.setRotation(1); // Set to landscape
+    tft.init();
+    tft.setRotation(1);
 
-  Serial.println("Display init done");
+    drawStaticUI();
+    drawBattery(0);
+    drawOdometer(simOdometer);
+    drawSpeed(0);
 
-  drawStaticUI();
-  drawTurnSignal(false, false);
-  drawBattery(simBattery);
-  drawOdometer(simOdometer);
-  drawSpeed(0);
+    telemetry_display_init();   // start TWAI
 
+    speedQueue = xQueueCreate(1, sizeof(int));
+    tftMutex   = xSemaphoreCreateMutex();
+    configASSERT(speedQueue != NULL);
+    configASSERT(tftMutex  != NULL);
+
+    xTaskCreatePinnedToCore(taskThrottle, "Throttle", 2048, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(taskDisplay,  "Display",  4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(taskAux,      "Aux",      2048, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(taskCanRx,    "CanRx",    4096, NULL, 3, NULL, 1);
 }
 
 void loop() {
-  unsigned long now = millis();
-  if (now - lastUpdate < 50) return;  
-  lastUpdate = now;
-
-  readThrottle();
-
-  int spd = (int)simSpeed;
-
-  // Only redraw what changed
-  if (spd != prevSpeed) {
-    updateArc(spd);
-    drawSpeed(spd);
-    prevSpeed = spd;
-  }
-
-  
-
+  vTaskDelay(portMAX_DELAY);
 }
