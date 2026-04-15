@@ -43,6 +43,22 @@ TFT_eSPI tft = TFT_eSPI();
 #define THROTTLE_MIN  500
 #define THROTTLE_MAX  3200
 
+// Three-position switch
+#define SPEED_PIN_LOW  25   // needs to be updated based on schematic
+#define SPEED_PIN_MED  26   
+#define SPEED_PIN_HIGH 27   
+
+// Throttle ADC ceiling for each mode (out of THROTTLE_MAX = 3200)
+#define THROTTLE_CAP_LOW  ((int)(THROTTLE_MAX * 0.30f))   // 30% 
+#define THROTTLE_CAP_MED  ((int)(THROTTLE_MAX * 0.60f))   // 60% 
+#define THROTTLE_CAP_HIGH  THROTTLE_MAX                    // 100% 
+
+typedef enum {
+    SPEED_MODE_LOW  = 0,
+    SPEED_MODE_MED  = 1,
+    SPEED_MODE_HIGH = 2,
+} SpeedMode;
+
 // FreeRTOS handles
 static QueueHandle_t    speedQueue;
 static SemaphoreHandle_t tftMutex;
@@ -147,17 +163,36 @@ void drawStaticUI() {
   drawArcBackground();
 }
 
+static SpeedMode read_speed_mode(void) {
+    if (digitalRead(SPEED_PIN_HIGH)  == LOW) return SPEED_MODE_HIGH;
+    if (digitalRead(SPEED_PIN_MED)  == LOW) return SPEED_MODE_MED;
+    return SPEED_MODE_LOW;   // default to LOW if no pin is pulled low
+}
+
 // ── FreeRTOS tasks ────────────────────────────────────────────────────────────
 
 void taskThrottle(void *pvParameters) {
     for (;;) {
-        uint16_t raw   = (uint16_t)analogRead(THROTTLE_PIN);
-        int      speed = (int)constrain(
-                           map(raw, THROTTLE_MIN, THROTTLE_MAX, 0, SPEED_MAX),
-                           0, SPEED_MAX);
+        uint16_t raw = (uint16_t)analogRead(THROTTLE_PIN);
+
+        // Apply ADC ceiling based on speed mode switch
+        SpeedMode mode = read_speed_mode();
+        int cap;
+        switch (mode) {
+            case SPEED_MODE_LOW:  cap = THROTTLE_CAP_LOW;  break;
+            case SPEED_MODE_MED:  cap = THROTTLE_CAP_MED;  break;
+            case SPEED_MODE_HIGH: cap = THROTTLE_CAP_HIGH; break;
+            default:              cap = THROTTLE_CAP_LOW;  break;  // safe fallback
+        }
+        uint16_t capped_raw = (uint16_t)constrain((int)raw, 0, cap);
+
+        // Map the *capped* ADC value to display speed 
+        int speed = (int)constrain(
+                        map(capped_raw, THROTTLE_MIN, THROTTLE_MAX, 0, SPEED_MAX),
+                        0, SPEED_MAX);
 
         xQueueOverwrite(speedQueue, &speed);
-        telemetry_send_throttle(raw);   // raw ADC → CAN 0x200
+        telemetry_send_throttle(capped_raw);   // motor controller gets the limited value
 
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -236,6 +271,10 @@ void setup() {
 
     analogReadResolution(12);
     pinMode(THROTTLE_PIN, INPUT);
+
+    pinMode(SPEED_PIN_LOW,  INPUT_PULLUP);
+    pinMode(SPEED_PIN_MED,  INPUT_PULLUP);
+    pinMode(SPEED_PIN_HIGH, INPUT_PULLUP);
 
     tft.init();
     tft.setRotation(1);
