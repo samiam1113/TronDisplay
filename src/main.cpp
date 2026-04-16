@@ -7,6 +7,8 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include "display_telemetry.h"
+#include "esp_task_wdt.h"
+#include "esp_system.h"
 
 
 TFT_eSPI tft = TFT_eSPI();
@@ -269,12 +271,15 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
+    esp_reset_reason_t reason = esp_reset_reason();
+    Serial.printf("[BOOT] Reset reason: %d\n", reason);
+
     analogReadResolution(12);
     pinMode(THROTTLE_PIN, INPUT);
 
-    pinMode(SPEED_PIN_LOW,  INPUT_PULLUP);
-    pinMode(SPEED_PIN_MED,  INPUT_PULLUP);
-    pinMode(SPEED_PIN_HIGH, INPUT_PULLUP);
+    //pinMode(SPEED_PIN_LOW,  INPUT_PULLUP);
+    //pinMode(SPEED_PIN_MED,  INPUT_PULLUP);
+    //pinMode(SPEED_PIN_HIGH, INPUT_PULLUP);
 
     tft.init();
     tft.setRotation(1);
@@ -284,6 +289,7 @@ void setup() {
     drawOdometer(simOdometer);
     drawSpeed(0);
 
+    esp_task_wdt_init(10, false);
     telemetry_display_init();   // start TWAI
 
     speedQueue = xQueueCreate(1, sizeof(int));
@@ -291,10 +297,10 @@ void setup() {
     configASSERT(speedQueue != NULL);
     configASSERT(tftMutex  != NULL);
 
-    xTaskCreatePinnedToCore(taskThrottle, "Throttle", 2048, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(taskThrottle, "Throttle", 2048, NULL, 3, NULL, 0);
     xTaskCreatePinnedToCore(taskDisplay,  "Display",  4096, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(taskAux,      "Aux",      2048, NULL, 1, NULL, 1);
-    xTaskCreatePinnedToCore(taskCanRx,    "CanRx",    4096, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(taskCanRx,    "CanRx",    4096, NULL, 3, NULL, 0);
 }
 
 void loop() {
