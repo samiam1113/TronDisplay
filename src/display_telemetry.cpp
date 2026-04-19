@@ -68,37 +68,56 @@ void telemetry_display_init(void) {
 static void handle_rx_frame(const twai_message_t *msg) {
     uint32_t id = msg->identifier;
 
-    if (id == CAN_ID_SPEED) {
-        if (msg->data_length_code < 4) return;
-        g_can_state.speed_mph    = unpack_float(msg->data, 0);
-        g_can_state.speed_updated = true;
+    // ── VESC native STATUS frames (extended 29-bit ID) ────────────────────
+    if (msg->extd) {
+    uint8_t pkt_id  = (id >> 8) & 0xFF;   // was id & 0xFF
+    uint8_t ctrl_id =  id & 0xFF;          // was (id >> 8) & 0xFF
+
+    if (ctrl_id != VESC_CONTROLLER_ID) return;
+
+        // CAN_PACKET_STATUS (9): RPM | current | duty
+        if (pkt_id == 9 && msg->data_length_code >= 8) {
+            g_can_state.vesc_rpm = (int32_t)(
+                  ((uint32_t)msg->data[0] << 24)
+                | ((uint32_t)msg->data[1] << 16)
+                | ((uint32_t)msg->data[2] <<  8)
+                |  (uint32_t)msg->data[3]);
+
+            g_can_state.vesc_current = (int16_t)(
+                ((uint16_t)msg->data[4] << 8) | msg->data[5]) / 10.0f;
+
+            g_can_state.vesc_duty = (int16_t)(
+                ((uint16_t)msg->data[6] << 8) | msg->data[7]) / 1000.0f;
+
+            g_can_state.vesc_updated  = true;
+            g_can_state.speed_updated = true;
+            return;
+        }
+
+        // CAN_PACKET_STATUS_5 (27): tachometer | input voltage
+        if (pkt_id == 27 && msg->data_length_code >= 8) {
+            // bytes 4-5: input voltage, scale ×10
+            int16_t vin_raw = (int16_t)(
+                ((uint16_t)msg->data[4] << 8) | msg->data[5]);
+            g_can_state.pack_voltage    = vin_raw / 10.0f;
+            g_can_state.voltage_updated = true;
+            return;
+        }
+
         return;
     }
 
-    if (id == CAN_ID_ACCEL) {
-        if (msg->data_length_code < 4) return;
-        g_can_state.accel_mss    = unpack_float(msg->data, 0);
-        g_can_state.accel_updated = true;
-        return;
-    }
-
-    if (id == CAN_ID_PACK_VOLTAGE) {
-        if (msg->data_length_code < 4) return;
-        g_can_state.pack_voltage    = unpack_float(msg->data, 0);
-        g_can_state.voltage_updated = true;
-        return;
-    }
-
+    // ── Your BMS fault frame (standard 11-bit) ────────────────────────────
     if (id == CAN_ID_FAULT) {
         if (msg->data_length_code < 8) return;
         g_can_state.fault_code  = ((uint32_t)msg->data[0] << 24)
                                  | ((uint32_t)msg->data[1] << 16)
                                  | ((uint32_t)msg->data[2] <<  8)
-                                 | ((uint32_t)msg->data[3]      );
+                                 |  (uint32_t)msg->data[3];
         g_can_state.fault_state = ((uint32_t)msg->data[4] << 24)
                                  | ((uint32_t)msg->data[5] << 16)
                                  | ((uint32_t)msg->data[6] <<  8)
-                                 | ((uint32_t)msg->data[7]      );
+                                 |  (uint32_t)msg->data[7];
         g_can_state.fault_active = true;
         Serial.printf("[disp-telem] Fault: code=%lu state=%lu\n",
                       g_can_state.fault_code, g_can_state.fault_state);
@@ -112,6 +131,10 @@ void taskCanRx(void *pvParameters) {
     twai_message_t msg;
     for (;;) {
         if (twai_receive(&msg, portMAX_DELAY) == ESP_OK) {
+            Serial.printf("ID: 0x%08X  extd: %d  dlc: %d  data: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                msg.identifier, msg.extd, msg.data_length_code,
+                msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
             handle_rx_frame(&msg);
         }
     }

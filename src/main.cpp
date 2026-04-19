@@ -254,9 +254,13 @@ void taskAux(void *pvParameters) {
     for (;;) {
         xSemaphoreTake(tftMutex, portMAX_DELAY);
 
-        // Speed → queue for arc gauge (taskDisplay handles the arc)
         if (g_can_state.speed_updated) {
-            int speed = (int)constrain(g_can_state.speed_mph, 0.0f, (float)SPEED_MAX);
+            // ERPM → mph
+            float motor_rpm = fabsf((float)g_can_state.vesc_rpm) / MOTOR_POLE_PAIRS;
+            float speed_ms  = (motor_rpm / 60.0f) * WHEEL_CIRC_M / GEAR_RATIO;
+            float speed_mph = speed_ms * 3600.0f / 1609.34f;
+
+            int speed = (int)constrain(speed_mph, 0.0f, (float)SPEED_MAX);
             xQueueOverwrite(speedQueue, &speed);
             g_can_state.speed_updated = false;
         }
@@ -268,12 +272,6 @@ void taskAux(void *pvParameters) {
             drawBattery(battPct);
             drawPackVoltage(g_can_state.pack_voltage);
             g_can_state.voltage_updated = false;
-        }
-
-        // Acceleration readout
-        if (g_can_state.accel_updated) {
-            drawAccel(g_can_state.accel_mss);
-            g_can_state.accel_updated = false;
         }
 
         // Fault indicator
