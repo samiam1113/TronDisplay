@@ -40,7 +40,7 @@ extern DisplayCanState g_can_state;
 // ── Motor/wheel constants — adjust to your hardware ──────────────────────────
 #define MOTOR_POLE_PAIRS    7        // electrical pole pairs
 #define WHEEL_CIRC_M        1.35f    // wheel circumference in metres
-#define GEAR_RATIO          1.0f     // motor:wheel, 1.0 = direct drive
+#define GEAR_RATIO          3.0f     // motor:wheel, 3.0 = direct drive
 
 void telemetry_display_init(void);
 void taskCanRx(void *pvParameters);
